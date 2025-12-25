@@ -1,8 +1,5 @@
-# VidGen Serverless - Minimal Dependencies
-# PyTorch is already in the base image
-
 runpod==1.6.2
-diffusers==0.30.3
+diffusers==0.31.0
 transformers==4.36.2
 accelerate==0.25.0
 huggingface-hub==0.20.3
@@ -10,3 +7,4 @@ safetensors==0.4.2
 pillow==10.2.0
 imageio==2.34.0
 imageio-ffmpeg==0.4.9
+peft==0.7.1
