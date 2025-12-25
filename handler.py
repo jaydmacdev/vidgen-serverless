@@ -10,6 +10,7 @@ import base64
 import io
 import os
 import time
+import gc
 from PIL import Image
 import torch
 from diffusers import WanPipeline
@@ -26,11 +27,17 @@ def load_model():
         print("🔄 Loading Wan2.2-I2V with Distilled LoRA...")
         
         try:
+            # Clear CUDA cache before loading
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+            
             # Load base pipeline
             pipeline = WanPipeline.from_pretrained(
                 "Wan-AI/Wan2.2-I2V-A14B",
                 torch_dtype=torch.float16,
-                variant="fp16"
+                variant="fp16",
+                low_cpu_mem_usage=True
             )
             
             pipeline.to("cuda")
@@ -39,29 +46,42 @@ def load_model():
             pipeline.enable_model_cpu_offload()
             pipeline.enable_vae_slicing()
             
+            # Enable memory efficient attention
             try:
                 pipeline.enable_xformers_memory_efficient_attention()
                 print("✅ xFormers enabled")
-            except:
-                print("⚠️ xFormers not available")
+            except Exception as e:
+                print(f"⚠️ xFormers not available: {e}")
+                try:
+                    pipeline.enable_attention_slicing(1)
+                    print("✅ Attention slicing enabled")
+                except:
+                    pass
             
             # Load distilled LoRA for 4-step inference
             print("📦 Loading distilled LoRA...")
-            pipeline.load_lora_weights(
-                "lightx2v/Wan2.2-Distill-Loras",
-                weight_name="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors"
-            )
+            try:
+                pipeline.load_lora_weights(
+                    "lightx2v/Wan2.2-Distill-Loras",
+                    weight_name="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors"
+                )
+                print("✅ LoRA loaded successfully!")
+            except Exception as e:
+                print(f"⚠️ LoRA loading failed: {e}")
+                print("⚠️ Continuing with base model (will use more steps)")
             
             print("✅ Model loaded successfully!")
             
+            # Clear cache after loading
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+            
         except Exception as e:
             print(f"❌ Model loading failed: {str(e)}")
-            print("⚠️ Falling back to base model without LoRA")
-            pipeline = WanPipeline.from_pretrained(
-                "Wan-AI/Wan2.2-I2V-A14B",
-                torch_dtype=torch.float16
-            )
-            pipeline.to("cuda")
+            import traceback
+            traceback.print_exc()
+            raise
     
     return pipeline
 
@@ -117,6 +137,12 @@ def handler(event):
         print("🎬 VidGen: Wan2.2 4-Step Generation with Prompt Support")
         print("=" * 70)
         
+        # Clear CUDA cache at start
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            print(f"🎮 GPU Memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
+        
         # Extract input data
         input_data = event.get("input", {})
         
@@ -151,7 +177,7 @@ def handler(event):
         fps = input_data.get("fps", 16)
         num_inference_steps = 4  # Fixed for distilled model
         
-        print(f"\n⚙️  Configuration:")
+        print(f"\n⚙️ Configuration:")
         print(f"   • Quality: {quality}")
         print(f"   • Frames: {num_frames} (~{num_frames/fps:.1f}s)")
         print(f"   • FPS: {fps}")
@@ -164,13 +190,18 @@ def handler(event):
         pipe = load_model()
         
         # Process input image
-        print(f"\n🖼️  Processing input image...")
+        print(f"\n🖼️ Processing input image...")
         image = base64_to_image(image_base64)
         print(f"   • Original size: {image.size}")
         
         # Resize to Wan2.2 optimal resolution (1280x720)
         image = image.resize((1280, 720), Image.LANCZOS)
         print(f"   • Resized to: {image.size}")
+        
+        # Clear cache before generation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
         
         # Generate video
         if prompt:
@@ -183,33 +214,40 @@ def handler(event):
         # Use 4-step denoising schedule for distilled model
         denoising_steps = [1000, 750, 500, 250]
         
-        # Generate with or without prompt
-        if prompt:
-            output = pipe(
-                prompt=prompt,
-                image=image,
-                num_frames=num_frames,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=7.5,
-                height=720,
-                width=1280,
-                timesteps=denoising_steps[:num_inference_steps]
-            )
-        else:
-            output = pipe(
-                image=image,
-                num_frames=num_frames,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=7.5,
-                height=720,
-                width=1280,
-                timesteps=denoising_steps[:num_inference_steps]
-            )
+        # Generate with torch.no_grad() to save memory
+        with torch.no_grad():
+            # Generate with or without prompt
+            if prompt:
+                output = pipe(
+                    prompt=prompt,
+                    image=image,
+                    num_frames=num_frames,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=7.5,
+                    height=720,
+                    width=1280,
+                    timesteps=denoising_steps[:num_inference_steps]
+                )
+            else:
+                output = pipe(
+                    image=image,
+                    num_frames=num_frames,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=7.5,
+                    height=720,
+                    width=1280,
+                    timesteps=denoising_steps[:num_inference_steps]
+                )
         
         frames = output.frames[0]
         
         gen_time = time.time() - gen_start
         print(f"   ✅ Generated in {gen_time:.2f}s ({num_frames/gen_time:.1f} fps)")
+        
+        # Clear cache after generation
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
         
         # Save video
         print(f"\n💾 Saving video...")
@@ -228,6 +266,11 @@ def handler(event):
             os.remove(output_path)
         except:
             pass
+        
+        # Final cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
         
         total_time = time.time() - start_time
         
@@ -259,6 +302,11 @@ def handler(event):
         
         print(f"\n❌ ERROR: {error_msg}")
         print(f"\n📋 Traceback:\n{error_trace}")
+        
+        # Cleanup on error
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
         
         return {
             "error": error_msg,
