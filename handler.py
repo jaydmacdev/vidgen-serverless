@@ -1,8 +1,6 @@
 """
-VidGen Serverless - Image to Video Generation Handler
-Model: Wan2.2-I2V-A14B with Distilled LoRA (4-step inference)
-Features: Text prompt support for guided generation
-Platform: RunPod Serverless
+VidGen Production Handler
+Optimized for RunPod Serverless with better error handling
 """
 
 import runpod
@@ -11,212 +9,195 @@ import io
 import os
 import time
 import gc
+import sys
 from PIL import Image
 import torch
+
+print("=" * 70)
+print("🚀 VidGen Handler Initializing...")
+print(f"Python: {sys.version}")
+print(f"PyTorch: {torch.__version__}")
+print(f"CUDA Available: {torch.cuda.is_available()}")
+
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+print("=" * 70)
+
+# Import after checking CUDA
 from diffusers import WanPipeline
 from diffusers.utils import export_to_video
 
-# Global pipeline variable
+# Global pipeline
 pipeline = None
+model_loaded = False
 
 def load_model():
-    """Load Wan2.2 I2V model with distilled LoRA"""
-    global pipeline
+    """Load model with comprehensive error handling"""
+    global pipeline, model_loaded
     
-    if pipeline is None:
-        print("🔄 Loading Wan2.2-I2V with Distilled LoRA...")
+    if model_loaded:
+        return pipeline
+    
+    try:
+        print("\n" + "=" * 70)
+        print("📦 Loading Wan2.2-I2V Model...")
+        print("=" * 70)
         
+        # Clear GPU memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        # Load with explicit settings
+        print("Step 1/4: Downloading model from Hugging Face...")
+        pipeline = WanPipeline.from_pretrained(
+            "Wan-AI/Wan2.2-I2V-A14B",
+            torch_dtype=torch.float16,
+            variant="fp16",
+            low_cpu_mem_usage=True,
+            safety_checker=None,
+            requires_safety_checker=False
+        )
+        
+        print("Step 2/4: Moving to GPU...")
+        pipeline = pipeline.to("cuda")
+        
+        print("Step 3/4: Enabling optimizations...")
+        pipeline.enable_model_cpu_offload()
+        pipeline.enable_vae_slicing()
+        
+        # Try xformers
         try:
-            # Clear CUDA cache before loading
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                gc.collect()
-            
-            # Load base pipeline
-            pipeline = WanPipeline.from_pretrained(
-                "Wan-AI/Wan2.2-I2V-A14B",
-                torch_dtype=torch.float16,
-                variant="fp16",
-                low_cpu_mem_usage=True
-            )
-            
-            pipeline.to("cuda")
-            
-            # Memory optimizations
-            pipeline.enable_model_cpu_offload()
-            pipeline.enable_vae_slicing()
-            
-            # Enable memory efficient attention
-            try:
-                pipeline.enable_xformers_memory_efficient_attention()
-                print("✅ xFormers enabled")
-            except Exception as e:
-                print(f"⚠️ xFormers not available: {e}")
-                try:
-                    pipeline.enable_attention_slicing(1)
-                    print("✅ Attention slicing enabled")
-                except:
-                    pass
-            
-            # Load distilled LoRA for 4-step inference
-            print("📦 Loading distilled LoRA...")
-            try:
-                pipeline.load_lora_weights(
-                    "lightx2v/Wan2.2-Distill-Loras",
-                    weight_name="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors"
-                )
-                print("✅ LoRA loaded successfully!")
-            except Exception as e:
-                print(f"⚠️ LoRA loading failed: {e}")
-                print("⚠️ Continuing with base model (will use more steps)")
-            
-            print("✅ Model loaded successfully!")
-            
-            # Clear cache after loading
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                gc.collect()
-            
+            pipeline.enable_xformers_memory_efficient_attention()
+            print("   ✅ xFormers enabled")
         except Exception as e:
-            print(f"❌ Model loading failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            raise
-    
-    return pipeline
+            print(f"   ⚠️ xFormers failed: {e}")
+            try:
+                pipeline.enable_attention_slicing(1)
+                print("   ✅ Attention slicing enabled")
+            except:
+                pass
+        
+        print("Step 4/4: Loading LoRA weights...")
+        try:
+            pipeline.load_lora_weights(
+                "lightx2v/Wan2.2-Distill-Loras",
+                weight_name="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors"
+            )
+            print("   ✅ 4-step LoRA loaded")
+        except Exception as e:
+            print(f"   ⚠️ LoRA loading failed: {e}")
+            print("   ℹ️ Continuing without LoRA (will use 25 steps)")
+        
+        # Final cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        model_loaded = True
+        print("\n✅ Model loaded successfully!")
+        print("=" * 70)
+        
+        return pipeline
+        
+    except Exception as e:
+        print(f"\n❌ CRITICAL: Model loading failed!")
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 def base64_to_image(base64_string):
-    """Convert base64 string to PIL Image"""
+    """Convert base64 to PIL Image"""
     try:
+        if ',' in base64_string:
+            base64_string = base64_string.split(',')[1]
         image_data = base64.b64decode(base64_string)
         image = Image.open(io.BytesIO(image_data))
         return image.convert("RGB")
     except Exception as e:
-        raise ValueError(f"Failed to decode image: {str(e)}")
+        raise ValueError(f"Image decode failed: {e}")
 
 def video_to_base64(video_path):
-    """Convert video file to base64 string"""
+    """Convert video to base64"""
     try:
         with open(video_path, "rb") as f:
-            video_data = f.read()
-        return base64.b64encode(video_data).decode('utf-8')
+            return base64.b64encode(f.read()).decode('utf-8')
     except Exception as e:
-        raise ValueError(f"Failed to encode video: {str(e)}")
+        raise ValueError(f"Video encode failed: {e}")
 
 def handler(event):
-    """
-    Main RunPod Handler Function
-    
-    Expected Input:
-    {
-        "input": {
-            "image_base64": "base64_encoded_image",
-            "prompt": "A person walking in a park",  // OPTIONAL
-            "quality": "standard",  // draft, standard, high
-            "num_frames": 65,  // OPTIONAL - overrides quality preset
-            "fps": 16  // OPTIONAL
-        }
-    }
-    
-    Output:
-    {
-        "video_base64": "base64_encoded_video",
-        "width": 1280,
-        "height": 720,
-        "fps": 16,
-        "num_frames": 65,
-        "processing_time": 35.2,
-        "generation_time": 32.1,
-        "prompt_used": "A person walking in a park"
-    }
-    """
+    """Main handler with comprehensive error handling"""
     start_time = time.time()
+    output_path = None
     
     try:
-        print("=" * 70)
-        print("🎬 VidGen: Wan2.2 4-Step Generation with Prompt Support")
+        print("\n" + "=" * 70)
+        print("🎬 New Generation Request")
         print("=" * 70)
         
-        # Clear CUDA cache at start
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
-            print(f"🎮 GPU Memory: {torch.cuda.memory_allocated() / 1024**3:.2f} GB allocated")
-        
-        # Extract input data
+        # Parse input
         input_data = event.get("input", {})
-        
         if not input_data:
-            return {"error": "No input data provided"}
+            return {"error": "No input provided"}
         
         image_base64 = input_data.get("image_base64")
-        
         if not image_base64:
-            return {"error": "Missing required field: image_base64"}
+            return {"error": "Missing image_base64"}
         
-        # Get prompt (optional)
-        prompt = input_data.get("prompt", "")
-        if prompt:
-            print(f"📝 Prompt: {prompt}")
-        
-        # Get quality preset or custom params
-        quality = input_data.get("quality", "standard")
-        
-        # Allow custom override or use quality preset
-        if "num_frames" in input_data:
-            num_frames = input_data.get("num_frames")
-        else:
-            # Map quality to frame count
-            if quality == "draft":
-                num_frames = 49  # ~3 seconds at 16fps
-            elif quality == "high":
-                num_frames = 81  # ~5 seconds at 16fps
-            else:  # standard
-                num_frames = 65  # ~4 seconds at 16fps
-        
+        # Get parameters
+        prompt = input_data.get("prompt", "").strip()
+        quality = input_data.get("quality", "standard").lower()
         fps = input_data.get("fps", 16)
-        num_inference_steps = 4  # Fixed for distilled model
+        
+        # Map quality to frames
+        quality_map = {
+            "draft": 49,
+            "standard": 65,
+            "high": 81
+        }
+        num_frames = input_data.get("num_frames", quality_map.get(quality, 65))
         
         print(f"\n⚙️ Configuration:")
-        print(f"   • Quality: {quality}")
-        print(f"   • Frames: {num_frames} (~{num_frames/fps:.1f}s)")
-        print(f"   • FPS: {fps}")
-        print(f"   • Inference Steps: {num_inference_steps} (4-step distilled)")
+        print(f"   Quality: {quality}")
+        print(f"   Frames: {num_frames} (~{num_frames/fps:.1f}s)")
+        print(f"   FPS: {fps}")
         if prompt:
-            print(f"   • Prompt: '{prompt}'")
+            print(f"   Prompt: '{prompt}'")
+        
+        # Clear memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            mem_allocated = torch.cuda.memory_allocated() / 1024**3
+            print(f"\n💾 GPU Memory: {mem_allocated:.2f} GB allocated")
         
         # Load model
-        print(f"\n📦 Loading model...")
         pipe = load_model()
         
-        # Process input image
-        print(f"\n🖼️ Processing input image...")
+        # Process image
+        print(f"\n🖼️ Processing image...")
         image = base64_to_image(image_base64)
-        print(f"   • Original size: {image.size}")
+        print(f"   Original: {image.size}")
         
-        # Resize to Wan2.2 optimal resolution (1280x720)
         image = image.resize((1280, 720), Image.LANCZOS)
-        print(f"   • Resized to: {image.size}")
+        print(f"   Resized: {image.size}")
         
-        # Clear cache before generation
+        # Clear memory before generation
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
         
-        # Generate video
-        if prompt:
-            print(f"\n🎨 Generating {num_frames} frames with prompt...")
-        else:
-            print(f"\n🎨 Generating {num_frames} frames (no prompt)...")
-        
+        # Generate
+        print(f"\n🎨 Generating video...")
         gen_start = time.time()
         
-        # Use 4-step denoising schedule for distilled model
-        denoising_steps = [1000, 750, 500, 250]
+        # Use 4-step if LoRA loaded, else 25 steps
+        num_inference_steps = 4 if model_loaded else 25
+        print(f"   Using {num_inference_steps} inference steps")
         
-        # Generate with torch.no_grad() to save memory
         with torch.no_grad():
-            # Generate with or without prompt
             if prompt:
                 output = pipe(
                     prompt=prompt,
@@ -225,39 +206,37 @@ def handler(event):
                     num_inference_steps=num_inference_steps,
                     guidance_scale=7.5,
                     height=720,
-                    width=1280,
-                    timesteps=denoising_steps[:num_inference_steps]
+                    width=1280
                 )
             else:
                 output = pipe(
                     image=image,
                     num_frames=num_frames,
                     num_inference_steps=num_inference_steps,
-                    guidance_scale=7.5,
                     height=720,
-                    width=1280,
-                    timesteps=denoising_steps[:num_inference_steps]
+                    width=1280
                 )
         
         frames = output.frames[0]
-        
         gen_time = time.time() - gen_start
-        print(f"   ✅ Generated in {gen_time:.2f}s ({num_frames/gen_time:.1f} fps)")
         
-        # Clear cache after generation
+        print(f"   ✅ Generated in {gen_time:.2f}s")
+        print(f"   Speed: {num_frames/gen_time:.1f} fps")
+        
+        # Clear memory after generation
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
         
         # Save video
-        print(f"\n💾 Saving video...")
-        output_path = "/tmp/output_video.mp4"
+        print(f"\n💾 Exporting video...")
+        output_path = f"/tmp/video_{int(time.time())}.mp4"
         export_to_video(frames, output_path, fps=fps)
         
-        file_size = os.path.getsize(output_path)
-        print(f"   • Video size: {file_size / 1024 / 1024:.2f} MB")
+        file_size_mb = os.path.getsize(output_path) / 1024 / 1024
+        print(f"   File: {file_size_mb:.2f} MB")
         
-        # Encode to base64
+        # Encode
         print(f"\n📤 Encoding to base64...")
         video_base64 = video_to_base64(output_path)
         
@@ -267,16 +246,15 @@ def handler(event):
         except:
             pass
         
-        # Final cleanup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
         
         total_time = time.time() - start_time
         
-        print(f"\n✅ Success!")
-        print(f"   • Total time: {total_time:.2f}s")
-        print(f"   • Generation time: {gen_time:.2f}s")
+        print(f"\n✅ SUCCESS!")
+        print(f"   Total: {total_time:.2f}s")
+        print(f"   Generation: {gen_time:.2f}s")
         print("=" * 70)
         
         result = {
@@ -287,7 +265,8 @@ def handler(event):
             "num_frames": num_frames,
             "processing_time": round(total_time, 2),
             "generation_time": round(gen_time, 2),
-            "quality": quality
+            "quality": quality,
+            "file_size_mb": round(file_size_mb, 2)
         }
         
         if prompt:
@@ -302,8 +281,15 @@ def handler(event):
         
         print(f"\n❌ ERROR: {error_msg}")
         print(f"\n📋 Traceback:\n{error_trace}")
+        print("=" * 70)
         
-        # Cleanup on error
+        # Cleanup
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
+        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
@@ -313,16 +299,8 @@ def handler(event):
             "traceback": error_trace
         }
 
-# Initialize RunPod serverless handler
+# Start RunPod serverless
 if __name__ == "__main__":
-    print("🚀 VidGen Serverless Handler Starting...")
-    print(f"🔥 PyTorch Version: {torch.__version__}")
-    print(f"🎮 CUDA Available: {torch.cuda.is_available()}")
-    
-    if torch.cuda.is_available():
-        print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
-        print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
-    
-    print("\n✅ Handler ready for requests with prompt support...")
-    
+    print("\n✅ Handler ready. Waiting for requests...")
+    print("=" * 70 + "\n")
     runpod.serverless.start({"handler": handler})
