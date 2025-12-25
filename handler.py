@@ -27,7 +27,7 @@ if torch.cuda.is_available():
 print("=" * 80)
 
 # Import diffusers
-from diffusers import WanPipeline
+from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video
 
 # Global variables
@@ -55,7 +55,7 @@ def load_model():
         
         # Step 1: Load base model
         print("\n[1/3] Loading Wan2.2-I2V-A14B base model...")
-        pipeline = WanPipeline.from_pretrained(
+        pipeline = WanImageToVideoPipeline.from_pretrained(
             "Wan-AI/Wan2.2-I2V-A14B",
             torch_dtype=torch.float16,
             variant="fp16",
