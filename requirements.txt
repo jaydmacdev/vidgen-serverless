@@ -1,16 +1,10 @@
-# VidGen Serverless Dependencies
-# Tested and compatible versions
+# VidGen Minimal Dependencies
+# Only what's needed (PyTorch already in base image)
 
 runpod==1.6.2
-torch==2.2.0
 diffusers==0.31.0
 transformers==4.36.2
 accelerate==0.25.0
-huggingface-hub==0.20.3
-safetensors==0.4.2
-peft==0.7.1
 pillow==10.2.0
 imageio==2.34.0
 imageio-ffmpeg==0.4.9
-xformers==0.0.23.post1
-opencv-python-headless==4.8.1.78
