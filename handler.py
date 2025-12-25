@@ -1,6 +1,6 @@
 """
 VidGen Serverless - Image to Video Generation Handler
-Model: Stable Video Diffusion (SVD)
+Model: Wan2.2-I2V-A14B with Distilled LoRA (4-step inference)
 Platform: RunPod Serverless
 """
 
@@ -11,30 +11,46 @@ import os
 import time
 from PIL import Image
 import torch
-from diffusers import StableVideoDiffusionPipeline
+from diffusers import WanPipeline
 from diffusers.utils import export_to_video
 
 # Global pipeline variable
 pipeline = None
 
 def load_model():
-    """Load Stable Video Diffusion model"""
+    """Load Wan2.2 I2V model with distilled LoRA"""
     global pipeline
     
     if pipeline is None:
-        print("🔄 Loading Stable Video Diffusion XL...")
+        print("🔄 Loading Wan2.2-I2V with Distilled LoRA...")
         
-        pipeline = StableVideoDiffusionPipeline.from_pretrained(
-            "stabilityai/stable-video-diffusion-img2vid-xt",
+        # Load base pipeline
+        pipeline = WanPipeline.from_pretrained(
+            "Wan-AI/Wan2.2-I2V-A14B",
             torch_dtype=torch.float16,
             variant="fp16"
         )
         
         pipeline.to("cuda")
+        
+        # Memory optimizations
         pipeline.enable_model_cpu_offload()
         pipeline.enable_vae_slicing()
         
-        print("✅ Model loaded successfully!")
+        try:
+            pipeline.enable_xformers_memory_efficient_attention()
+            print("✅ xFormers enabled")
+        except:
+            print("⚠️ xFormers not available")
+        
+        # Load distilled LoRA for 4-step inference
+        print("📦 Loading distilled LoRA...")
+        pipeline.load_lora_weights(
+            "lightx2v/Wan2.2-Distill-Loras",
+            weight_name="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors"
+        )
+        
+        print("✅ Model loaded successfully with 4-step LoRA!")
     
     return pipeline
 
@@ -64,30 +80,28 @@ def handler(event):
     {
         "input": {
             "image_base64": "base64_encoded_image",
-            "num_frames": 25,
-            "fps": 8,
-            "motion_bucket_id": 127,
-            "noise_aug_strength": 0.02,
-            "num_inference_steps": 25
+            "num_frames": 81,
+            "fps": 16,
+            "quality": "standard"
         }
     }
     
     Output:
     {
         "video_base64": "base64_encoded_video",
-        "width": 1024,
-        "height": 576,
-        "fps": 8,
-        "num_frames": 25,
-        "processing_time": 45.2,
-        "generation_time": 42.1
+        "width": 1280,
+        "height": 720,
+        "fps": 16,
+        "num_frames": 81,
+        "processing_time": 35.2,
+        "generation_time": 32.1
     }
     """
     start_time = time.time()
     
     try:
         print("=" * 70)
-        print("🎬 VidGen: Starting Image-to-Video Generation")
+        print("🎬 VidGen: Wan2.2 4-Step Generation")
         print("=" * 70)
         
         # Extract input data
@@ -102,19 +116,28 @@ def handler(event):
             return {"error": "Missing required field: image_base64"}
         
         # Parameters with defaults
-        num_frames = input_data.get("num_frames", 25)
-        fps = input_data.get("fps", 8)
-        motion_bucket_id = input_data.get("motion_bucket_id", 127)
-        noise_aug_strength = input_data.get("noise_aug_strength", 0.02)
-        num_inference_steps = input_data.get("num_inference_steps", 25)
+        quality = input_data.get("quality", "standard")  # draft, standard, high
+        
+        # Map quality to parameters
+        if quality == "draft":
+            num_frames = 49  # ~3 seconds at 16fps
+            num_inference_steps = 4
+        elif quality == "high":
+            num_frames = 81  # ~5 seconds at 16fps
+            num_inference_steps = 4
+        else:  # standard
+            num_frames = 65  # ~4 seconds at 16fps
+            num_inference_steps = 4
+        
+        fps = 16  # Wan2.2 optimal FPS
         
         print(f"\n⚙️  Configuration:")
+        print(f"   • Quality: {quality}")
         print(f"   • Frames: {num_frames}")
         print(f"   • FPS: {fps}")
-        print(f"   • Motion Intensity: {motion_bucket_id}")
-        print(f"   • Inference Steps: {num_inference_steps}")
+        print(f"   • Inference Steps: {num_inference_steps} (4-step distilled)")
         
-        # Load model (cached after first call)
+        # Load model
         print(f"\n📦 Loading model...")
         pipe = load_model()
         
@@ -124,22 +147,28 @@ def handler(event):
         original_size = image.size
         print(f"   • Original size: {original_size}")
         
-        # Resize to optimal SVD resolution (1024x576)
-        image = image.resize((1024, 576), Image.LANCZOS)
+        # Resize to Wan2.2 optimal resolution (1280x720)
+        image = image.resize((1280, 720), Image.LANCZOS)
         print(f"   • Resized to: {image.size}")
         
         # Generate video
-        print(f"\n🎨 Generating {num_frames} frames...")
+        print(f"\n🎨 Generating {num_frames} frames with 4-step inference...")
         gen_start = time.time()
         
-        frames = pipe(
+        # Use 4-step denoising schedule for distilled model
+        denoising_steps = [1000, 750, 500, 250]
+        
+        output = pipe(
             image=image,
             num_frames=num_frames,
-            decode_chunk_size=8,
-            motion_bucket_id=motion_bucket_id,
-            noise_aug_strength=noise_aug_strength,
-            num_inference_steps=num_inference_steps
-        ).frames[0]
+            num_inference_steps=num_inference_steps,
+            guidance_scale=7.5,
+            height=720,
+            width=1280,
+            timesteps=denoising_steps[:num_inference_steps]
+        )
+        
+        frames = output.frames[0]
         
         gen_time = time.time() - gen_start
         print(f"   ✅ Generated in {gen_time:.2f}s")
@@ -168,16 +197,18 @@ def handler(event):
         print(f"\n✅ Success!")
         print(f"   • Total time: {total_time:.2f}s")
         print(f"   • Generation time: {gen_time:.2f}s")
+        print(f"   • Speed: {num_frames / gen_time:.1f} fps")
         print("=" * 70)
         
         return {
             "video_base64": video_base64,
-            "width": 1024,
-            "height": 576,
+            "width": 1280,
+            "height": 720,
             "fps": fps,
             "num_frames": num_frames,
             "processing_time": round(total_time, 2),
-            "generation_time": round(gen_time, 2)
+            "generation_time": round(gen_time, 2),
+            "quality": quality
         }
         
     except Exception as e:
