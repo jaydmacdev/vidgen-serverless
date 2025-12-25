@@ -1,5 +1,5 @@
-# VidGen Serverless - Minimal Dependencies
-# PyTorch installed separately in Dockerfile
+# VidGen Serverless - Dependencies
+# PyTorch already in base image
 
 runpod==1.6.2
 diffusers==0.31.0
