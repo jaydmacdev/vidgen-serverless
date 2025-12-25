@@ -1,6 +1,7 @@
 """
 VidGen Serverless - Image to Video Generation Handler
 Model: Wan2.2-I2V-A14B with Distilled LoRA (4-step inference)
+Features: Text prompt support for guided generation
 Platform: RunPod Serverless
 """
 
@@ -24,33 +25,43 @@ def load_model():
     if pipeline is None:
         print("🔄 Loading Wan2.2-I2V with Distilled LoRA...")
         
-        # Load base pipeline
-        pipeline = WanPipeline.from_pretrained(
-            "Wan-AI/Wan2.2-I2V-A14B",
-            torch_dtype=torch.float16,
-            variant="fp16"
-        )
-        
-        pipeline.to("cuda")
-        
-        # Memory optimizations
-        pipeline.enable_model_cpu_offload()
-        pipeline.enable_vae_slicing()
-        
         try:
-            pipeline.enable_xformers_memory_efficient_attention()
-            print("✅ xFormers enabled")
-        except:
-            print("⚠️ xFormers not available")
-        
-        # Load distilled LoRA for 4-step inference
-        print("📦 Loading distilled LoRA...")
-        pipeline.load_lora_weights(
-            "lightx2v/Wan2.2-Distill-Loras",
-            weight_name="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors"
-        )
-        
-        print("✅ Model loaded successfully with 4-step LoRA!")
+            # Load base pipeline
+            pipeline = WanPipeline.from_pretrained(
+                "Wan-AI/Wan2.2-I2V-A14B",
+                torch_dtype=torch.float16,
+                variant="fp16"
+            )
+            
+            pipeline.to("cuda")
+            
+            # Memory optimizations
+            pipeline.enable_model_cpu_offload()
+            pipeline.enable_vae_slicing()
+            
+            try:
+                pipeline.enable_xformers_memory_efficient_attention()
+                print("✅ xFormers enabled")
+            except:
+                print("⚠️ xFormers not available")
+            
+            # Load distilled LoRA for 4-step inference
+            print("📦 Loading distilled LoRA...")
+            pipeline.load_lora_weights(
+                "lightx2v/Wan2.2-Distill-Loras",
+                weight_name="wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors"
+            )
+            
+            print("✅ Model loaded successfully!")
+            
+        except Exception as e:
+            print(f"❌ Model loading failed: {str(e)}")
+            print("⚠️ Falling back to base model without LoRA")
+            pipeline = WanPipeline.from_pretrained(
+                "Wan-AI/Wan2.2-I2V-A14B",
+                torch_dtype=torch.float16
+            )
+            pipeline.to("cuda")
     
     return pipeline
 
@@ -80,9 +91,10 @@ def handler(event):
     {
         "input": {
             "image_base64": "base64_encoded_image",
-            "num_frames": 81,
-            "fps": 16,
-            "quality": "standard"
+            "prompt": "A person walking in a park",  // OPTIONAL
+            "quality": "standard",  // draft, standard, high
+            "num_frames": 65,  // OPTIONAL - overrides quality preset
+            "fps": 16  // OPTIONAL
         }
     }
     
@@ -92,16 +104,17 @@ def handler(event):
         "width": 1280,
         "height": 720,
         "fps": 16,
-        "num_frames": 81,
+        "num_frames": 65,
         "processing_time": 35.2,
-        "generation_time": 32.1
+        "generation_time": 32.1,
+        "prompt_used": "A person walking in a park"
     }
     """
     start_time = time.time()
     
     try:
         print("=" * 70)
-        print("🎬 VidGen: Wan2.2 4-Step Generation")
+        print("🎬 VidGen: Wan2.2 4-Step Generation with Prompt Support")
         print("=" * 70)
         
         # Extract input data
@@ -115,27 +128,36 @@ def handler(event):
         if not image_base64:
             return {"error": "Missing required field: image_base64"}
         
-        # Parameters with defaults
-        quality = input_data.get("quality", "standard")  # draft, standard, high
+        # Get prompt (optional)
+        prompt = input_data.get("prompt", "")
+        if prompt:
+            print(f"📝 Prompt: {prompt}")
         
-        # Map quality to parameters
-        if quality == "draft":
-            num_frames = 49  # ~3 seconds at 16fps
-            num_inference_steps = 4
-        elif quality == "high":
-            num_frames = 81  # ~5 seconds at 16fps
-            num_inference_steps = 4
-        else:  # standard
-            num_frames = 65  # ~4 seconds at 16fps
-            num_inference_steps = 4
+        # Get quality preset or custom params
+        quality = input_data.get("quality", "standard")
         
-        fps = 16  # Wan2.2 optimal FPS
+        # Allow custom override or use quality preset
+        if "num_frames" in input_data:
+            num_frames = input_data.get("num_frames")
+        else:
+            # Map quality to frame count
+            if quality == "draft":
+                num_frames = 49  # ~3 seconds at 16fps
+            elif quality == "high":
+                num_frames = 81  # ~5 seconds at 16fps
+            else:  # standard
+                num_frames = 65  # ~4 seconds at 16fps
+        
+        fps = input_data.get("fps", 16)
+        num_inference_steps = 4  # Fixed for distilled model
         
         print(f"\n⚙️  Configuration:")
         print(f"   • Quality: {quality}")
-        print(f"   • Frames: {num_frames}")
+        print(f"   • Frames: {num_frames} (~{num_frames/fps:.1f}s)")
         print(f"   • FPS: {fps}")
         print(f"   • Inference Steps: {num_inference_steps} (4-step distilled)")
+        if prompt:
+            print(f"   • Prompt: '{prompt}'")
         
         # Load model
         print(f"\n📦 Loading model...")
@@ -144,41 +166,56 @@ def handler(event):
         # Process input image
         print(f"\n🖼️  Processing input image...")
         image = base64_to_image(image_base64)
-        original_size = image.size
-        print(f"   • Original size: {original_size}")
+        print(f"   • Original size: {image.size}")
         
         # Resize to Wan2.2 optimal resolution (1280x720)
         image = image.resize((1280, 720), Image.LANCZOS)
         print(f"   • Resized to: {image.size}")
         
         # Generate video
-        print(f"\n🎨 Generating {num_frames} frames with 4-step inference...")
+        if prompt:
+            print(f"\n🎨 Generating {num_frames} frames with prompt...")
+        else:
+            print(f"\n🎨 Generating {num_frames} frames (no prompt)...")
+        
         gen_start = time.time()
         
         # Use 4-step denoising schedule for distilled model
         denoising_steps = [1000, 750, 500, 250]
         
-        output = pipe(
-            image=image,
-            num_frames=num_frames,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=7.5,
-            height=720,
-            width=1280,
-            timesteps=denoising_steps[:num_inference_steps]
-        )
+        # Generate with or without prompt
+        if prompt:
+            output = pipe(
+                prompt=prompt,
+                image=image,
+                num_frames=num_frames,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=7.5,
+                height=720,
+                width=1280,
+                timesteps=denoising_steps[:num_inference_steps]
+            )
+        else:
+            output = pipe(
+                image=image,
+                num_frames=num_frames,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=7.5,
+                height=720,
+                width=1280,
+                timesteps=denoising_steps[:num_inference_steps]
+            )
         
         frames = output.frames[0]
         
         gen_time = time.time() - gen_start
-        print(f"   ✅ Generated in {gen_time:.2f}s")
+        print(f"   ✅ Generated in {gen_time:.2f}s ({num_frames/gen_time:.1f} fps)")
         
-        # Save video to temporary file
+        # Save video
         print(f"\n💾 Saving video...")
         output_path = "/tmp/output_video.mp4"
         export_to_video(frames, output_path, fps=fps)
         
-        # Get file size
         file_size = os.path.getsize(output_path)
         print(f"   • Video size: {file_size / 1024 / 1024:.2f} MB")
         
@@ -197,10 +234,9 @@ def handler(event):
         print(f"\n✅ Success!")
         print(f"   • Total time: {total_time:.2f}s")
         print(f"   • Generation time: {gen_time:.2f}s")
-        print(f"   • Speed: {num_frames / gen_time:.1f} fps")
         print("=" * 70)
         
-        return {
+        result = {
             "video_base64": video_base64,
             "width": 1280,
             "height": 720,
@@ -210,6 +246,11 @@ def handler(event):
             "generation_time": round(gen_time, 2),
             "quality": quality
         }
+        
+        if prompt:
+            result["prompt_used"] = prompt
+        
+        return result
         
     except Exception as e:
         import traceback
@@ -234,6 +275,6 @@ if __name__ == "__main__":
         print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
         print(f"💾 VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
-    print("\n✅ Handler ready, waiting for requests...")
+    print("\n✅ Handler ready for requests with prompt support...")
     
     runpod.serverless.start({"handler": handler})
