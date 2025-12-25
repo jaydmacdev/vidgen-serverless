@@ -3,11 +3,6 @@
 # RunPod
 runpod==1.6.2
 
-# PyTorch & Vision
-torch==2.1.2
-torchvision==0.16.2
-torchaudio==2.1.2
-
 # Diffusers & Transformers
 diffusers==0.30.3
 transformers==4.36.2
