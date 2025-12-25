@@ -1,66 +1,25 @@
-# VidGen Serverless - Dockerfile
-# Base: NVIDIA CUDA 12.1 with cuDNN 8
-# Model: Stable Video Diffusion
+# VidGen Serverless - Simplified Dockerfile
+# Using RunPod's official PyTorch base image
 
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM runpod/pytorch:2.1.0-py3.10-cuda12.1.0-devel-ubuntu22.04
 
 # Metadata
 LABEL maintainer="your-email@example.com"
 LABEL description="VidGen Serverless - Image to Video Generation API"
 LABEL version="1.0.0"
 
-# Environment variables
-ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
-    CUDA_HOME=/usr/local/cuda
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3.10-dev \
-    python3-pip \
-    build-essential \
-    git \
-    wget \
-    curl \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    libglib2.0-0 \
-    libgl1-mesa-glx \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set Python 3.10 as default
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 && \
-    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
-
-# Upgrade pip
-RUN pip install --upgrade pip setuptools wheel
-
 # Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python dependencies
+# Copy requirements
 COPY requirements.txt .
 
-# Install PyTorch first (separately for better error handling)
-RUN pip install --no-cache-dir \
-    torch==2.1.2 \
-    torchvision==0.16.2 \
-    --index-url https://download.pytorch.org/whl/cu121
-
-# Install remaining dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY handler.py .
-
-# Health check (optional)
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import torch; assert torch.cuda.is_available()" || exit 1
 
 # Run handler
 CMD ["python", "-u", "handler.py"]
