@@ -1,33 +1,29 @@
-# VidGen Production Dockerfile - Optimized for RunPod
-FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04
+# VidGen Simple Dockerfile - Optimized for GitHub Actions
+FROM runpod/pytorch:2.2.0-py3.10-cuda12.1.1-runtime-ubuntu22.04
 
-# Prevent interactive prompts
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
+# Prevent prompts and set Python
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libglib2.0-0 \
-    libgl1-mesa-glx \
-    git \
-    wget \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
 WORKDIR /app
 
-# Copy requirements first (for better caching)
+# Install system dependencies in one layer
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsm6 \
+        libxext6 \
+        libglib2.0-0 \
+        libgl1 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Copy requirements first (better caching)
 COPY requirements.txt .
 
-# Upgrade pip
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-
-# Install Python packages
+# Install Python packages - all in one RUN to reduce layers
 RUN pip install --no-cache-dir \
     runpod==1.6.2 \
     diffusers==0.31.0 \
@@ -38,8 +34,8 @@ RUN pip install --no-cache-dir \
     peft==0.7.1 \
     pillow==10.2.0 \
     imageio==2.34.0 \
-    imageio-ffmpeg==0.4.9 \
-    xformers==0.0.23.post1
+    imageio-ffmpeg==0.4.9 && \
+    rm -rf ~/.cache/pip
 
 # Copy handler
 COPY handler.py .
@@ -47,14 +43,13 @@ COPY handler.py .
 # Create cache directory
 RUN mkdir -p /runpod-volume/.cache
 
-# Set environment variables
-ENV HF_HOME=/runpod-volume/.cache
-ENV TRANSFORMERS_CACHE=/runpod-volume/.cache
-ENV HF_DATASETS_CACHE=/runpod-volume/.cache
+# Set env vars for Hugging Face cache
+ENV HF_HOME=/runpod-volume/.cache \
+    TRANSFORMERS_CACHE=/runpod-volume/.cache
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import torch; assert torch.cuda.is_available()" || exit 1
+# Minimal metadata
+LABEL maintainer="vidgen" \
+      version="1.0"
 
-# Run handler
+# Run
 CMD ["python", "-u", "handler.py"]
