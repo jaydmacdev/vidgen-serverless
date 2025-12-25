@@ -26,7 +26,7 @@ if torch.cuda.is_available():
     print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 print("=" * 80)
 
-# Import diffusers
+# Import diffusers - CORRECT IMPORT FOR WAN2.2
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video
 
