@@ -1,0 +1,28 @@
+# VidGen Serverless - Python Dependencies
+
+# RunPod
+runpod==1.6.2
+
+# PyTorch & Vision
+torch==2.1.2
+torchvision==0.16.2
+torchaudio==2.1.2
+
+# Diffusers & Transformers
+diffusers==0.30.3
+transformers==4.36.2
+accelerate==0.25.0
+
+# Hugging Face
+huggingface-hub==0.20.3
+safetensors==0.4.2
+
+# Image & Video Processing
+pillow==10.2.0
+opencv-python-headless==4.9.0.80
+imageio==2.34.0
+imageio-ffmpeg==0.4.9
+
+# Utilities
+numpy==1.26.3
+requests==2.31.0
